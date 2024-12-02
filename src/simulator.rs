@@ -6,7 +6,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use std::time::{Duration, Instant};
 use std::{thread, vec};
 
-pub type Endpoint = Box<dyn FnMut(&mut TcpStream) -> () + Send>;
+pub type Endpoint<'a> = Box<dyn FnMut(&mut TcpStream) + Send + 'a>;
 
 pub fn run(
     buf_size: impl IntoIterator<Item = usize> + Clone,
@@ -18,12 +18,10 @@ pub fn run(
     let mut rows = Vec::new();
 
     for buf_size in buf_size.into_iter() {
-        let row: Array1<f64> = Array::from_iter(
-            delay
-                .clone()
-                .into_iter()
-                .map(|delay| run_once(buf_size, delay, iters, e1, e2)),
-        );
+        let row: Array1<f64> = Array::from_iter(delay.clone().into_iter().map(|delay| {
+            println!("buf_size = {buf_size}, delay = {delay}");
+            run_once(buf_size, delay, iters, e1, e2)
+        }));
 
         rows.push(row);
     }
@@ -33,7 +31,7 @@ pub fn run(
     stack(Axis(0), rows.as_slice()).unwrap()
 }
 
-pub fn run_once<'a>(
+pub fn run_once(
     buf_size: usize,
     delay: u64,
     iters: u32,
@@ -87,26 +85,24 @@ pub fn run_once<'a>(
 
     while !bridge_up.load(Ordering::Acquire) {}
 
-    let clients_start = Arc::new(AtomicBool::new(false));
+    let clients_iter = Arc::new(AtomicU32::new(0));
     let clients_done = Arc::new(AtomicU32::new(0));
-    let clients_cont = Arc::new(AtomicBool::new(true));
 
     let start_client = |e: &mut Endpoint| {
-        let start = clients_start.clone();
+        let next_iter = clients_iter.clone();
         let done = clients_done.clone();
-        let cont = clients_cont.clone();
 
         let mut stream = TcpStream::connect("localhost:8000").unwrap();
 
-        while cont.load(Ordering::Acquire) {
-            if !start.load(Ordering::Acquire) {
-                continue;
+        let mut i = 0;
+
+        while i < iters {
+            let j = next_iter.load(Ordering::Acquire);
+            if j > i {
+                e(&mut stream);
+                i = j;
+                done.fetch_add(1, Ordering::AcqRel);
             }
-
-            e(&mut stream);
-
-            done.fetch_add(1, Ordering::AcqRel);
-            start.store(false, Ordering::Release);
         }
     };
 
@@ -117,8 +113,8 @@ pub fn run_once<'a>(
 
         let now = Instant::now();
 
-        for _ in 0..iters {
-            clients_start.store(true, Ordering::Release);
+        for i in 1..=iters {
+            clients_iter.store(i, Ordering::Release);
 
             while clients_done.load(Ordering::Acquire) < 2 {}
 
@@ -128,7 +124,6 @@ pub fn run_once<'a>(
         let elapsed = now.elapsed();
         time = (elapsed.as_millis() as f64) / (iters as f64);
 
-        clients_cont.store(false, Ordering::Release);
         bridge_cont.store(false, Ordering::Release);
 
         client1.join().unwrap();

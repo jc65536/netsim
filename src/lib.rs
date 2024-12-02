@@ -38,8 +38,8 @@ mod tests {
         println!(
             "{:?}",
             simulator::run(
-                (1..10).step_by(2),
-                (0..300).step_by(100),
+                (4..10).step_by(2),
+                (20..400).step_by(100),
                 3,
                 &mut client,
                 &mut server,
